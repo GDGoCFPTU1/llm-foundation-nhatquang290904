@@ -1,292 +1,243 @@
 """
 Day 1 — LLM API Foundation
-AICB-P1: AI Practical Competency Program, Phase 1
+Test suite for student solutions and master keys.
 
-Instructions:
-    1. Fill in every section marked with TODO.
-    2. Do NOT change function signatures.
-    3. Copy this file to solution/solution.py when done.
-    4. Run: pytest tests/ -v
+Run from the 02-lab/ folder:
+    pytest tests/ -v
+
+All external API calls are mocked — no real API keys or internet connection required.
 """
 
+import importlib.util
 import os
-import time
-from typing import Any, Callable
+import sys
+import unittest
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
-# ---------------------------------------------------------------------------
-# Estimated costs per 1M INPUT & OUTPUT tokens (USD) as of March 2026
-# Vietnamese text generally consumes ~1.5x - 2.0x more tokens than English due to Unicode/diacritics.
-# ---------------------------------------------------------------------------
-PRICING_1M_TOKENS = {
-    "gpt-4o": {"input": 5.00, "output": 20.00},
-    "gpt-4o-mini": {"input": 0.150, "output": 0.600},
-    "gemini-2.5-flash": {"input": 0.075, "output": 0.300},
-    "gemini-2.5-pro": {"input": 1.25, "output": 5.00},
-    "claude-3-5-sonnet": {"input": 3.00, "output": 15.00},
-    "claude-3-5-haiku": {"input": 0.80, "output": 4.00},
-}
+# Locate directories relative to this test file
+TESTS_DIR = Path(__file__).parent
+LAB_DIR = TESTS_DIR.parent
 
-# Standard Model Identifiers
-OPENAI_MODEL = "gpt-4o"
-OPENAI_MINI_MODEL = "gpt-4o-mini"
-GEMINI_MODEL = "gemini-2.5-flash"
-ANTHROPIC_MODEL = "claude-3-5-haiku"
+# Resolve module paths
+SOLUTION_PATH = LAB_DIR / "solution-code" / "solution.py"
+TEMPLATE_PATH = LAB_DIR / "starter-code" / "template.py"
+
+def _load_module(path: Path, unique_name: str):
+    if not path.exists():
+        raise FileNotFoundError(f"Target file not found at: {path}")
+    spec = importlib.util.spec_from_file_location(unique_name, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[unique_name] = mod
+    spec.loader.exec_module(mod)
+    return mod
 
 
-# ---------------------------------------------------------------------------
-# Task 1 — Call OpenAI (GPT-4o)
-# ---------------------------------------------------------------------------
-def call_openai(
-    prompt: str,
-    model: str = OPENAI_MODEL,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
-    max_tokens: int = 256,
-) -> tuple[str, float, dict]:
-    """
-    Call the OpenAI Chat Completions API and return the response text, latency,
-    and token usage stats.
+# Dynamically load the solution module if it exists (for grading), otherwise test the starter template
+if SOLUTION_PATH.exists():
+    _m = _load_module(SOLUTION_PATH, "solution")
+else:
+    _m = _load_module(TEMPLATE_PATH, "template")
 
-    Args:
-        prompt:      The user message to send.
-        model:       The OpenAI model to use (default: gpt-4o).
-        temperature: Sampling temperature (0.0 – 2.0).
-        top_p:       Nucleus sampling threshold.
-        max_tokens:  Maximum number of tokens to generate.
-
-    Returns:
-        A tuple of:
-            - response_text (str)
-            - latency_seconds (float)
-            - usage (dict with keys: 'input_tokens', 'output_tokens')
-
-    Hint:
-        from openai import OpenAI
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        # response.usage contains input_tokens and output_tokens (prompt_tokens/completion_tokens)
-    """
-    # TODO: Import OpenAI, instantiate client, call chat.completions.create with parameters,
-    #       measure execution start/end time, extract text and token usage, and return them.
-    raise NotImplementedError("Implement call_openai")
+# Import target functions
+call_openai = getattr(_m, "call_openai")
+call_gemini = getattr(_m, "call_gemini")
+call_anthropic = getattr(_m, "call_anthropic")
+compare_models = getattr(_m, "compare_models")
+streaming_chatbot = getattr(_m, "streaming_chatbot")
+retry_with_backoff = getattr(_m, "retry_with_backoff")
+batch_compare = getattr(_m, "batch_compare")
+format_comparison_table = getattr(_m, "format_comparison_table")
 
 
 # ---------------------------------------------------------------------------
-# Task 2 — Call Google Gemini 2.5 (Standard Practical Model)
+# Mock Generators
 # ---------------------------------------------------------------------------
-def call_gemini(
-    prompt: str,
-    model: str = GEMINI_MODEL,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
-    max_tokens: int = 256,
-) -> tuple[str, float, dict]:
-    """
-    Call the Google Gemini API (using Gemini 2.5 Flash as standard) and return
-    the response text, latency, and token usage stats.
+def _make_openai_response(text: str = "Hello from OpenAI"):
+    choice = MagicMock()
+    choice.message.content = text
+    resp = MagicMock()
+    resp.choices = [choice]
+    usage = MagicMock()
+    usage.prompt_tokens = 10
+    usage.completion_tokens = 20
+    resp.usage = usage
+    return resp
 
-    Args:
-        prompt:      The user message to send.
-        model:       The Gemini model to use (default: gemini-2.5-flash).
-        temperature: Sampling temperature.
-        top_p:       Nucleus sampling threshold.
-        max_tokens:  Maximum number of tokens to generate.
 
-    Returns:
-        A tuple of:
-            - response_text (str)
-            - latency_seconds (float)
-            - usage (dict with keys: 'input_tokens', 'output_tokens')
+def _make_gemini_response(text: str = "Hello from Gemini"):
+    resp = MagicMock()
+    resp.text = text
+    usage = MagicMock()
+    usage.prompt_token_count = 12
+    usage.candidates_token_count = 25
+    resp.usage_metadata = usage
+    return resp
 
-    Hint:
-        Option A (New Google GenAI SDK):
-            from google import genai
-            from google.genai import types
-            client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-            # Configure using types.GenerateContentConfig
+
+def _make_anthropic_response(text: str = "Hello from Anthropic"):
+    resp = MagicMock()
+    content_part = MagicMock()
+    content_part.text = text
+    resp.content = [content_part]
+    usage = MagicMock()
+    usage.input_tokens = 15
+    usage.output_tokens = 30
+    resp.usage = usage
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Test Cases
+# ---------------------------------------------------------------------------
+class TestCallOpenAI(unittest.TestCase):
+
+    @patch("openai.OpenAI")
+    def test_openai_returns_tuple_structure(self, MockOpenAI):
+        mock_client = MagicMock()
+        MockOpenAI.return_value = mock_client
+        mock_client.chat.completions.create.return_value = _make_openai_response("OpenAI Mock Response")
+
+        text, latency, usage = call_openai("Hello")
+
+        self.assertEqual(text, "OpenAI Mock Response")
+        self.assertIsInstance(latency, float)
+        self.assertGreaterEqual(latency, 0.0)
+        self.assertEqual(usage["input_tokens"], 10)
+        self.assertEqual(usage["output_tokens"], 20)
+
+
+class TestCallGemini(unittest.TestCase):
+
+    @patch("google.genai.Client")
+    def test_gemini_returns_tuple_structure_new_sdk(self, MockGenAIClient):
+        mock_client = MagicMock()
+        MockGenAIClient.return_value = mock_client
+        mock_client.models.generate_content.return_value = _make_gemini_response("Gemini Mock Response")
+
+        text, latency, usage = call_gemini("Hello")
+
+        self.assertEqual(text, "Gemini Mock Response")
+        self.assertIsInstance(latency, float)
+        self.assertGreaterEqual(latency, 0.0)
+        self.assertEqual(usage["input_tokens"], 12)
+        self.assertEqual(usage["output_tokens"], 25)
+
+
+class TestCallAnthropic(unittest.TestCase):
+
+    @patch("anthropic.Anthropic")
+    def test_anthropic_returns_tuple_structure(self, MockAnthropic):
+        mock_client = MagicMock()
+        MockAnthropic.return_value = mock_client
+        mock_client.messages.create.return_value = _make_anthropic_response("Claude Mock Response")
+
+        text, latency, usage = call_anthropic("Hello")
+
+        self.assertEqual(text, "Claude Mock Response")
+        self.assertIsInstance(latency, float)
+        self.assertGreaterEqual(latency, 0.0)
+        self.assertEqual(usage["input_tokens"], 15)
+        self.assertEqual(usage["output_tokens"], 30)
+
+
+class TestCompareModels(unittest.TestCase):
+
+    def test_compare_models_evaluates_correct_costs(self):
+        with patch.object(_m, "call_openai") as mock_openai, \
+             patch.object(_m, "call_gemini") as mock_gemini:
+             
+            # Setup mock returns
+            mock_openai.side_effect = [
+                ("GPT-4o Response", 0.5, {"input_tokens": 10, "output_tokens": 20}),       # 1st call: gpt-4o
+                ("GPT-4o-Mini Response", 0.3, {"input_tokens": 10, "output_tokens": 20}),  # 2nd call: gpt-4o-mini
+            ]
+            mock_gemini.return_value = (
+                "Gemini Response",
+                0.4,
+                {"input_tokens": 10, "output_tokens": 20}
+            )
+
+            result = compare_models("Prompt")
+
+            # Verify keys exist
+            self.assertIn("gpt4o", result)
+            self.assertIn("gpt4o_mini", result)
+            self.assertIn("gemini_flash", result)
+
+            # Verify exact cost calculations
+            # gpt-4o: (10 * 5.0 + 20 * 20.0) / 1,000,000 = 0.00045
+            self.assertAlmostEqual(result["gpt4o"]["cost"], 0.00045, places=8)
             
-        Option B (Legacy Google GenerativeAI SDK):
-            import google.generativeai as genai
-            genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-            model_inst = genai.GenerativeModel(model)
-            # Configure using genai.types.GenerationConfig
+            # gpt-4o-mini: (10 * 0.150 + 20 * 0.600) / 1,000,000 = 0.0000135
+            self.assertAlmostEqual(result["gpt4o_mini"]["cost"], 0.0000135, places=8)
             
-        Ensure your usage dictionary extracts 'input_tokens' and 'output_tokens' 
-        from the response metadata (e.g. response.usage_metadata).
-    """
-    # TODO: Initialize Gemini client, set config parameters, call generate_content,
-    #       measure latency, extract response text and usage metadata, and return the tuple.
-    raise NotImplementedError("Implement call_gemini")
+            # gemini-2.5-flash: (10 * 0.075 + 20 * 0.300) / 1,000,000 = 0.00000675
+            self.assertAlmostEqual(result["gemini_flash"]["cost"], 0.00000675, places=8)
 
 
-# ---------------------------------------------------------------------------
-# Task 3 — Call Anthropic Claude (Exploratory track)
-# ---------------------------------------------------------------------------
-def call_anthropic(
-    prompt: str,
-    model: str = ANTHROPIC_MODEL,
-    temperature: float = 0.7,
-    top_p: float = 0.9,
-    max_tokens: int = 256,
-) -> tuple[str, float, dict]:
-    """
-    Call the Anthropic Claude API (using Claude 3.5 Haiku as default) and return
-    the response text, latency, and token usage stats.
+class TestRetryWithBackoff(unittest.TestCase):
 
-    Args:
-        prompt:      The user message to send.
-        model:       The Claude model to use (default: claude-3-5-haiku).
-        temperature: Sampling temperature (0.0 - 1.0).
-        top_p:       Nucleus sampling threshold.
-        max_tokens:  Maximum output tokens.
+    def test_succeeds_immediately(self):
+        val = retry_with_backoff(lambda: "success")
+        self.assertEqual(val, "success")
 
-    Returns:
-        A tuple of:
-            - response_text (str)
-            - latency_seconds (float)
-            - usage (dict with keys: 'input_tokens', 'output_tokens')
+    def test_succeeds_after_retries(self):
+        state = {"attempts": 0}
 
-    Hint:
-        import anthropic
-        client = anthropic.Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-        # response.usage contains input_tokens and output_tokens
-    """
-    # TODO: Initialize Anthropic client, create message, measure latency,
-    #       extract content text and usage statistics, and return the tuple.
-    raise NotImplementedError("Implement call_anthropic")
+        def flaky_fn():
+            state["attempts"] += 1
+            if state["attempts"] < 3:
+                raise ValueError("Fail")
+            return "ok"
+
+        val = retry_with_backoff(flaky_fn, max_retries=3, base_delay=0.001)
+        self.assertEqual(val, "ok")
+        self.assertEqual(state["attempts"], 3)
+
+    def test_raises_permanent_exception(self):
+        def permanent_fail():
+            raise RuntimeError("Permanent")
+
+        with self.assertRaises(RuntimeError):
+            retry_with_backoff(permanent_fail, max_retries=2, base_delay=0.001)
 
 
-# ---------------------------------------------------------------------------
-# Task 4 — Compare Models (OpenAI GPT-4o vs OpenAI Mini vs Gemini 2.5 Flash)
-# ---------------------------------------------------------------------------
-def compare_models(prompt: str) -> dict:
-    """
-    Call OpenAI (gpt-4o), OpenAI Mini (gpt-4o-mini), and Gemini 2.5 Flash (gemini-2.5-flash)
-    with the same prompt and return a structured comparison dictionary.
+class TestBatchCompareAndFormat(unittest.TestCase):
 
-    Calculate the exact USD token cost for input + output using the prices in PRICING_1M_TOKENS.
+    def test_batch_runs_and_formats_table(self):
+        with patch.object(_m, "compare_models") as mock_comp:
+            def _get_mock():
+                return {
+                    "gpt4o": {"response": "GPT-4o response content here", "latency": 0.5, "cost": 0.00045, "input_tokens": 10, "output_tokens": 20},
+                    "gpt4o_mini": {"response": "GPT-4o-Mini response content here", "latency": 0.3, "cost": 0.0000135, "input_tokens": 10, "output_tokens": 20},
+                    "gemini_flash": {"response": "Gemini response content here", "latency": 0.4, "cost": 0.00000675, "input_tokens": 10, "output_tokens": 20}
+                }
+            mock_comp.side_effect = _get_mock
 
-    Args:
-        prompt: The user message to send to all models.
+            results = batch_compare(["Q1", "Q2"])
+            self.assertEqual(len(results), 2)
+            self.assertEqual(results[0]["prompt"], "Q1")
 
-    Returns:
-        A dictionary containing:
-            - "gpt4o": { "response": str, "latency": float, "cost": float, "input_tokens": int, "output_tokens": int }
-            - "gpt4o_mini": { "response": str, "latency": float, "cost": float, "input_tokens": int, "output_tokens": int }
-            - "gemini_flash": { "response": str, "latency": float, "cost": float, "input_tokens": int, "output_tokens": int }
-    """
-    # TODO: Call call_openai with default gpt-4o model
-    # TODO: Call call_openai with gpt-4o-mini model
-    # TODO: Call call_gemini with default gemini-2.5-flash model
-    # TODO: Calculate costs exactly based on input and output token counts using PRICING_1M_TOKENS
-    #       Formula: Cost = (input_tokens * input_rate_per_1M + output_tokens * output_rate_per_1M) / 1,000,000
-    # TODO: Assemble and return the comparison dictionary.
-    raise NotImplementedError("Implement compare_models")
+            table = format_comparison_table(results)
+            self.assertIsInstance(table, str)
+            self.assertIn("Prompt", table)
+            self.assertIn("GPT-4o", table)
+            self.assertIn("Gemini-Flash", table)
+            self.assertIn("Q1", table)
 
 
-# ---------------------------------------------------------------------------
-# Task 5 — Streaming chatbot with Gemini 2.5 (Focus Model)
-# ---------------------------------------------------------------------------
-def streaming_chatbot() -> None:
-    """
-    Run an interactive streaming chatbot in the terminal using Gemini 2.5.
+class TestStreamingChatbot(unittest.TestCase):
 
-    Behaviour:
-        - Streams response tokens from Gemini 2.5 Flash as they arrive.
-        - Maintains the last 3 turns of conversation history for context.
-        - Typing 'quit' or 'exit' ends the session.
-
-    Hints:
-        - Maintain a history list of conversation turns.
-        - Check how to stream responses using client.chats or model.generate_content(..., stream=True).
-        - Keep history limited to the last 3 turns to optimize context window and costs.
-    """
-    # TODO: Setup interactive session, prompt user for input, stream response, and update history.
-    raise NotImplementedError("Implement streaming_chatbot")
+    @patch("builtins.input", side_effect=["quit"])
+    @patch("google.genai.Client")
+    def test_exits_cleanly(self, MockClient, mock_input):
+        # Ensure it quits cleanly without entering infinite loop
+        try:
+            streaming_chatbot()
+        except SystemExit:
+            pass
 
 
-# ---------------------------------------------------------------------------
-# Bonus Task A — Retry with exponential backoff
-# ---------------------------------------------------------------------------
-def retry_with_backoff(
-    fn: Callable[[], Any],
-    max_retries: int = 3,
-    base_delay: float = 0.1,
-) -> Any:
-    """
-    Call fn(). If it raises an exception, retry up to max_retries times
-    with exponential backoff (delay = base_delay * 2^attempt).
-
-    Args:
-        fn:          Zero-argument callable to execute.
-        max_retries: Maximum number of retry attempts.
-        base_delay:  Initial delay in seconds before the first retry.
-
-    Returns:
-        The return value of fn() on success.
-
-    Raises:
-        The last exception raised by fn() after all retries are exhausted.
-    """
-    # TODO: implement retry loop with exponential backoff
-    raise NotImplementedError("Implement retry_with_backoff")
-
-
-# ---------------------------------------------------------------------------
-# Bonus Task B — Batch compare
-# ---------------------------------------------------------------------------
-def batch_compare(prompts: list[str]) -> list[dict]:
-    """
-    Run compare_models on each prompt in the list.
-
-    Args:
-        prompts: List of prompt strings.
-
-    Returns:
-        List of dicts, each being the compare_models result with an extra
-        key "prompt" containing the original prompt string.
-    """
-    # TODO: iterate over prompts, call compare_models, and inject the original "prompt".
-    raise NotImplementedError("Implement batch_compare")
-
-
-# ---------------------------------------------------------------------------
-# Bonus Task C — Format comparison table
-# ---------------------------------------------------------------------------
-def format_comparison_table(results: list[dict]) -> str:
-    """
-    Format a list of batch compare results as a readable Markdown table string.
-
-    Args:
-        results: List of dicts as returned by batch_compare.
-
-    Returns:
-        A beautiful Markdown table string with columns:
-        | Prompt | Model | Response (truncated) | Latency | Tokens (In/Out) | Cost (USD) |
-    """
-    # TODO: Build and return the formatted table string. Truncate response to 50 chars for clean display.
-    raise NotImplementedError("Implement format_comparison_table")
-
-
-# ---------------------------------------------------------------------------
-# Entry point for manual testing
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print("=== Model Comparison Test ===")
-    test_prompt = "Hãy giải thích sự khác biệt giữa temperature và top_p bằng tiếng Việt ngắn gọn trong 2 câu."
-    try:
-        # Note: Requires valid API keys set in environment variables
-        result = compare_models(test_prompt)
-        for model_name, stats in result.items():
-            print(f"\n[{model_name.upper()}]")
-            print(f"Latency: {stats['latency']:.2f}s | Cost: ${stats['cost']:.6f}")
-            print(f"Tokens: {stats['input_tokens']} in / {stats['output_tokens']} out")
-            print(f"Response: {stats['response']}")
-    except Exception as e:
-        print(f"Skipping live API comparison test: {e}")
-        print("Set your API keys to run manual tests.")
-
-    print("\n=== Starting Gemini 2.5 Chatbot (type 'quit' to exit) ===")
-    try:
-        streaming_chatbot()
-    except Exception as e:
-        print(f"Chatbot failed to start: {e}")
+    unittest.main()
